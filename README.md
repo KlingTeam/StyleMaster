@@ -20,8 +20,8 @@
 ✉ Corresponding Author
 
 ## TODO
-- [x] Code and Weight for V2V Implementation on [Wan-1.4B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
-- [x] Code and Weight for T2V Implementation on [Wan-1.4B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
+- [x] Code and Weight for V2V Implementation on [Wan-1.3B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
+- [x] Code and Weight for T2V Implementation on [Wan-1.3B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
 - [x] Illusion dataset generation
 
 ## V2V Results on Wan
