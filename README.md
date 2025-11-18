@@ -20,8 +20,20 @@
 ✉ Corresponding Author
 
 ## TODO
+- [x] Code and Weight for V2V Implementation on [Wan-1.4B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
 - [x] Code and Weight for T2V Implementation on [Wan-1.4B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
 - [x] Illusion dataset generation
+
+
+## V2V Results on Wan
+
+| Source Video | Style Image | Generated Video |
+|:------------:|:-----------:|:---------------:|
+| ![source1](example_test_data/girl.mp4) | ![style1](./example_test_data/style_images/05.jpg) | ![result1](./results/style_controlnet/video0.mp4) |
+|  | ![style2](./example_test_data/style_images/fine_1.jpg) | ![result2](./results/style_controlnet/video1.mp4) |
+|  | ![style3](./example_test_data/style_images/ukiyoe.jpg) | ![result3](./results/style_controlnet/video2.mp4) |
+|  | ![style4](./example_test_data/style_images/vangough.png) | ![result4](./results/style_controlnet/video3.mp4) |
+|  | ![style5](./example_test_data/style_images/005.jpg) | ![result5](./results/style_controlnet/video4.mp4) |
 
 ## Update
 - [2025.2] StyleMaster has been accepted by CVPR2025!

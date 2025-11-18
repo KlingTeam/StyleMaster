@@ -43,7 +43,9 @@ Once the setup is complete, you can easily generate images using the `inference_
 ```bash
 python inference_stylemaster.py 
 ```
-
+```bash
+python inference_stylemaster_v2v.py 
+```
 ## 🎓 Training
 
 You can train your own StyleMaster adapter on a custom dataset to capture a specific style. The complete workflow for data processing and training is detailed in `script.sh`.

@@ -11,13 +11,28 @@ from einops import rearrange
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from typing import Optional
-
+from typing import Optional, List
 from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear
 from ..models.wan_video_text_encoder import T5RelativeEmbedding, T5LayerNorm
 from ..models.wan_video_dit import RMSNorm, sinusoidal_embedding_1d
 from ..models.wan_video_vae import RMS_norm, CausalConv3d, Upsample
 
+
+def should_apply_controlnet(current_step, total_steps, start_ratio, end_ratio):
+    """
+    判断当前步骤是否应该应用ControlNet
+    
+    Args:
+        current_step: 当前步骤 (0 到 total_steps-1)
+        total_steps: 总步数
+        start_ratio: 开始应用的比例 (0.0-1.0)
+        end_ratio: 结束应用的比例 (0.0-1.0)
+    
+    Returns:
+        bool: 是否应该应用ControlNet
+    """
+    progress = current_step / total_steps
+    return start_ratio <= progress <= end_ratio
 
 
 class WanVideoStyleMasterPipeline(BasePipeline):
@@ -199,6 +214,11 @@ class WanVideoStyleMasterPipeline(BasePipeline):
         target_style=None,
         input_image=None,
         input_video=None,
+        control_video=None,  # 新增：控制视频
+        controlnet=None,     # 新增：ControlNet模型
+        controlnet_conditioning_scale=1.0,  # 新增：ControlNet条件强度
+        controlnet_guidance_start=0.0,  # 新增：ControlNet开始应用的步骤比例
+        controlnet_guidance_end=1.0,    # 新增：ControlNet结束应用的步骤比例
         denoising_strength=1.0,
         seed=None,
         rand_device="cpu",
@@ -243,6 +263,14 @@ class WanVideoStyleMasterPipeline(BasePipeline):
         else:
             latents = noise
         
+        # 处理控制视频
+        control_latents = None
+        if control_video is not None and controlnet is not None:
+            self.load_models_to_device(['vae'])
+            control_latents = self.encode_video(control_video, **tiler_kwargs).to(dtype=self.torch_dtype, device=self.device)
+            print(f"Control latents shape: {control_latents.shape}")
+            print(f"ControlNet guidance will be applied from step {controlnet_guidance_start:.1%} to {controlnet_guidance_end:.1%}")
+        
         image_embeds, image_embeds_ps = target_style
         # Encode prompts
         self.load_models_to_device(["text_encoder"])
@@ -276,11 +304,69 @@ class WanVideoStyleMasterPipeline(BasePipeline):
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
 
+            # 判断是否应该应用ControlNet
+            should_apply_control = should_apply_controlnet(
+                progress_id, 
+                len(self.scheduler.timesteps),
+                controlnet_guidance_start,
+                controlnet_guidance_end
+            )
+
+            # 获取ControlNet输出（如果需要且有）
+            control_state = None
+            if (controlnet is not None and 
+                control_latents is not None and 
+                should_apply_control):
+                control_state = controlnet(
+                    x=control_latents,
+                    timestep=timestep,
+                    context=prompt_emb_posi["context"],
+                    **image_emb
+                )
+                # print(f"Step {progress_id}: Applying ControlNet")
+            # elif controlnet is not None and not should_apply_control:
+            #     print(f"Step {progress_id}: Skipping ControlNet")
+
             # Inference
-            noise_pred_posi = model_fn_wan_video(self.dit, latents, timestep=timestep, style_feat=style_feat, **prompt_emb_posi, **image_emb, **extra_input, **tea_cache_posi)
+            noise_pred_posi = model_fn_wan_video(
+                self.dit, 
+                latents, 
+                timestep=timestep, 
+                style_feat=style_feat, 
+                control_state=control_state,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                **prompt_emb_posi, 
+                **image_emb, 
+                **extra_input, 
+                **tea_cache_posi
+            )
+            
             if cfg_scale != 1.0:
-                noise_pred_nega = model_fn_wan_video(self.dit, latents, timestep=timestep, style_feat=torch.zeros_like(style_feat), **prompt_emb_nega, **image_emb, **extra_input, **tea_cache_nega)
-                noise_pred_posi_text_nega_style = model_fn_wan_video(self.dit, latents, timestep=timestep, style_feat=torch.zeros_like(style_feat), **prompt_emb_posi, **image_emb, **extra_input, **tea_cache_nega)
+                noise_pred_nega = model_fn_wan_video(
+                    self.dit, 
+                    latents, 
+                    timestep=timestep, 
+                    style_feat=torch.zeros_like(style_feat), 
+                    control_state=control_state,
+                    controlnet_conditioning_scale=controlnet_conditioning_scale,
+                    **prompt_emb_nega, 
+                    **image_emb, 
+                    **extra_input, 
+                    **tea_cache_nega
+                )
+                
+                noise_pred_posi_text_nega_style = model_fn_wan_video(
+                    self.dit, 
+                    latents, 
+                    timestep=timestep, 
+                    style_feat=torch.zeros_like(style_feat), 
+                    control_state=control_state,
+                    controlnet_conditioning_scale=controlnet_conditioning_scale,
+                    **prompt_emb_posi, 
+                    **image_emb, 
+                    **extra_input, 
+                    **tea_cache_nega
+                )
 
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi_text_nega_style - noise_pred_nega)
                 noise_pred = noise_pred + style_cfg_scale * (noise_pred_posi - noise_pred_posi_text_nega_style)
@@ -361,6 +447,8 @@ def model_fn_wan_video(
     context: torch.Tensor,
     clip_feature: Optional[torch.Tensor] = None,
     y: Optional[torch.Tensor] = None,
+    control_state: Optional[List[torch.Tensor]] = None,  # ControlNet输出列表
+    controlnet_conditioning_scale: float = 1.0,
     tea_cache: TeaCache = None,
     **kwargs,
 ):
@@ -391,9 +479,19 @@ def model_fn_wan_video(
     if tea_cache_update:
         x = tea_cache.update(x)
     else:
-        # blocks
-        for block in dit.blocks:
+        control_stride = 2  # 假设ControlNet的层间隔为2
+        control_idx = 0
+        
+        for i, block in enumerate(dit.blocks):
             x = block(x, context, style_feat, t_mod, freqs)
+            
+            # 在对应的层添加ControlNet输出
+            if (control_state is not None and 
+                i % control_stride == 0 and 
+                control_idx < len(control_state)):
+                x = x + control_state[control_idx] * controlnet_conditioning_scale
+                control_idx += 1
+                
         if tea_cache is not None:
             tea_cache.store(x)
 

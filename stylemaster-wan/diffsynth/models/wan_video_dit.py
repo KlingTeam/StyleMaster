@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict
 from einops import rearrange
 from .utils import hash_state_dict_keys
+import copy
+
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
@@ -243,6 +245,173 @@ class Head(nn.Module):
         return x
 
 
+class WanControlNet(torch.nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        in_dim: int,
+        ffn_dim: int,
+        text_dim: int,
+        freq_dim: int,
+        eps: float,
+        patch_size: Tuple[int, int, int],
+        num_heads: int,
+        num_layers: int,
+        has_image_input: bool,
+        num_layer_stride: int = 2,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.freq_dim = freq_dim
+        self.has_image_input = has_image_input
+        self.patch_size = patch_size
+        self.num_layer_stride = num_layer_stride
+        self.num_layers = num_layers
+
+        # 使用与WanModel相同的结构
+        self.patch_embedding = nn.Conv3d(
+            in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.text_embedding = nn.Sequential(
+            nn.Linear(text_dim, dim),
+            nn.GELU(approximate='tanh'),
+            nn.Linear(dim, dim)
+        )
+        self.time_embedding = nn.Sequential(
+            nn.Linear(freq_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim)
+        )
+        self.time_projection = nn.Sequential(
+            nn.SiLU(), nn.Linear(dim, dim * 6))
+
+        # ControlNet的transformer blocks (根据stride选择层数)
+        self.control_blocks = nn.ModuleList([
+            DiTBlock(has_image_input, dim, num_heads, ffn_dim, eps)
+            for _ in range(0, num_layers, num_layer_stride)
+        ])
+        
+        # 零初始化的输出层
+        self.zero_convs = nn.ModuleList([
+            nn.Conv1d(dim, dim, 1) for _ in range(len(self.control_blocks))
+        ])
+        
+        # 初始化零卷积为零
+        for zero_conv in self.zero_convs:
+            nn.init.zeros_(zero_conv.weight)
+            nn.init.zeros_(zero_conv.bias)
+
+        head_dim = dim // num_heads
+        self.freqs = precompute_freqs_cis_3d(head_dim)
+
+        if has_image_input:
+            self.img_emb = MLP(1280, dim)
+
+    def patchify(self, x: torch.Tensor):
+        x = self.patch_embedding(x)
+        grid_size = x.shape[2:]
+        x = rearrange(x, 'b c f h w -> b (f h w) c').contiguous()
+        return x, grid_size
+
+    def load_from_wan_state_dict(self, wan_state_dict: Dict[str, torch.Tensor]):
+        """从WanModel的state_dict中加载参数"""
+        controlnet_state_dict = {}
+        
+        # 1. 直接复制的组件
+        direct_copy_components = [
+            'patch_embedding',
+            'text_embedding', 
+            'time_embedding',
+            'time_projection'
+        ]
+        
+        if self.has_image_input:
+            direct_copy_components.append('img_emb')
+        
+        for component in direct_copy_components:
+            for key, value in wan_state_dict.items():
+                if key.startswith(component + '.'):
+                    controlnet_state_dict[key] = value.clone()
+        
+        # 2. 复制对应的transformer blocks
+        selected_layers = list(range(0, self.num_layers, self.num_layer_stride))
+        
+        for controlnet_idx, wan_layer_idx in enumerate(selected_layers):
+            wan_block_prefix = f'blocks.{wan_layer_idx}.'
+            controlnet_block_prefix = f'control_blocks.{controlnet_idx}.'
+            
+            for key, value in wan_state_dict.items():
+                if key.startswith(wan_block_prefix):
+                    new_key = key.replace(wan_block_prefix, controlnet_block_prefix)
+                    controlnet_state_dict[new_key] = value.clone()
+        
+        # 3. 加载到模型中
+        missing_keys, unexpected_keys = self.load_state_dict(controlnet_state_dict, strict=False)
+        return missing_keys, unexpected_keys
+
+    def forward(self,
+                x: torch.Tensor,
+                timestep: torch.Tensor,
+                context: torch.Tensor,
+                clip_feature: Optional[torch.Tensor] = None,
+                y: Optional[torch.Tensor] = None,
+                use_gradient_checkpointing: bool = False,
+                use_gradient_checkpointing_offload: bool = False,
+                **kwargs,
+                ):
+        # 时间和文本嵌入
+        t = self.time_embedding(
+            sinusoidal_embedding_1d(self.freq_dim, timestep))
+        t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
+        context = self.text_embedding(context)
+        
+        if self.has_image_input:
+            x = torch.cat([x, y], dim=1)
+            clip_embdding = self.img_emb(clip_feature)
+            context = torch.cat([clip_embdding, context], dim=1)
+        
+        x, (f, h, w) = self.patchify(x)
+        
+        # 频率编码
+        freqs = torch.cat([
+            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
+        
+        def create_custom_forward(module):
+            def custom_forward(*inputs):
+                return module(*inputs)
+            return custom_forward
+
+        # 通过ControlNet blocks并收集输出
+        control_outputs = []
+        for i, block in enumerate(self.control_blocks):
+            if self.training and use_gradient_checkpointing:
+                if use_gradient_checkpointing_offload:
+                    with torch.autograd.graph.save_on_cpu():
+                        x = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(block),
+                            x, context, None, t_mod, freqs,  # style_feat=None
+                            use_reentrant=False,
+                        )
+                else:
+                    x = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        x, context, None, t_mod, freqs,  # style_feat=None
+                        use_reentrant=False,
+                    )
+            else:
+                x = block(x, context, None, t_mod, freqs)  # style_feat=None
+            
+            # 通过零卷积处理输出
+            x_reshaped = x.transpose(1, 2)  # (b, dim, seq_len)
+            control_out = self.zero_convs[i](x_reshaped)
+            control_out = control_out.transpose(1, 2)  # 转回 (b, seq_len, dim)
+            control_outputs.append(control_out)
+
+        return control_outputs
+
+
 class WanModel(torch.nn.Module):
     def __init__(
         self,
@@ -309,6 +478,8 @@ class WanModel(torch.nn.Module):
                 context: torch.Tensor,
                 clip_feature: Optional[torch.Tensor] = None,
                 y: Optional[torch.Tensor] = None,
+                control_state: Optional[List[torch.Tensor]] = None,  # 新增控制状态
+                controlnet_conditioning_scale: float = 1.0,  # 控制强度
                 use_gradient_checkpointing: bool = False,
                 use_gradient_checkpointing_offload: bool = False,
                 **kwargs,
@@ -336,7 +507,11 @@ class WanModel(torch.nn.Module):
                 return module(*inputs)
             return custom_forward
 
-        for block in self.blocks:
+        # 计算控制状态的层间隔（假设为2，可以根据实际情况调整）
+        control_stride = 2 if control_state is not None else None
+        control_idx = 0
+
+        for i, block in enumerate(self.blocks):
             if self.training and use_gradient_checkpointing:
                 if use_gradient_checkpointing_offload:
                     with torch.autograd.graph.save_on_cpu():
@@ -353,6 +528,14 @@ class WanModel(torch.nn.Module):
                     )
             else:
                 x = block(x, context, style_feat, t_mod, freqs)
+
+            # 添加控制状态
+            if (control_state is not None and 
+                control_stride is not None and 
+                i % control_stride == 0 and 
+                control_idx < len(control_state)):
+                x = x + control_state[control_idx] * controlnet_conditioning_scale
+                control_idx += 1
 
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
