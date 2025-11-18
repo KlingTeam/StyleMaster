@@ -29,11 +29,11 @@
 
 | Source Video | Style Image | Generated Video |
 |:------------:|:-----------:|:---------------:|
-| ![source1](example_test_data/girl.mp4) | ![style1](./example_test_data/style_images/05.jpg) | ![result1](./results/style_controlnet/video0.mp4) |
-|  | ![style2](./example_test_data/style_images/fine_1.jpg) | ![result2](./results/style_controlnet/video1.mp4) |
-|  | ![style3](./example_test_data/style_images/ukiyoe.jpg) | ![result3](./results/style_controlnet/video2.mp4) |
-|  | ![style4](./example_test_data/style_images/vangough.png) | ![result4](./results/style_controlnet/video3.mp4) |
-|  | ![style5](./example_test_data/style_images/005.jpg) | ![result5](./results/style_controlnet/video4.mp4) |
+| ![source1](stylemaster-wan/example_test_data/girl.mp4) | ![style1](stylemaster-wan/example_test_data/style_images/05.jpg) | ![result1](stylemaster-wan/results/style_controlnet/video0.mp4) |
+|  | ![style2](stylemaster-wan/example_test_data/style_images/fine_1.jpg) | ![result2](stylemaster-wan/results/style_controlnet/video1.mp4) |
+|  | ![style3](stylemaster-wan/example_test_data/style_images/ukiyoe.jpg) | ![result3](stylemaster-wan/results/style_controlnet/video2.mp4) |
+|  | ![style4](stylemaster-wan/example_test_data/style_images/vangough.png) | ![result4](stylemaster-wan/results/style_controlnet/video3.mp4) |
+|  | ![style5](stylemaster-wan/example_test_data/style_images/005.jpg) | ![result5](stylemaster-wan/results/style_controlnet/video4.mp4) |
 
 ## Update
 - [2025.2] StyleMaster has been accepted by CVPR2025!
