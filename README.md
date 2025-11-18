@@ -24,6 +24,8 @@
 - [x] Code and Weight for T2V Implementation on [Wan-1.4B](https://github.com/Wan-Video/Wan2.1) based on [Diffsynth-Studio](https://github.com/modelscope/DiffSynth-Studio) are avaiable.
 - [x] Illusion dataset generation
 
+## V2V Results on Wan
+![image](assets/v2v.gif)
 
 
 
